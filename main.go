@@ -6,7 +6,7 @@ import (
 	"log"
 	"net/http"
 
-	"github.com/stock-ahora/api-notification/internal/handlers"
+	"api-notification/internal/handlers"
 )
 
 func main() {
