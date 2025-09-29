@@ -8,7 +8,7 @@ WORKDIR /build
 COPY go.mod go.sum* ./
 
 # Descargar dependencias y actualizar paquetes del sistema
-RUN apk update && apk upgrade --no-cache && go mod download
+RUN go mod download
 
 # Copiar código fuente
 COPY . .
