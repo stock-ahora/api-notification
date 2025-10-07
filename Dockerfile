@@ -1,29 +1,31 @@
-# Build stage
+# Etapa 1: build
 FROM golang:1.25-alpine AS builder
 
-# Establecer directorio de trabajo
-WORKDIR /build
+# Crear y establecer directorio de trabajo
+WORKDIR /app
 
-# Copiar archivos de dependencias
-COPY go.mod go.sum* ./
-
-# Descargar dependencias y actualizar paquetes del sistema
+# Copiar go.mod y go.sum primero para aprovechar cache
+COPY go.mod go.sum ./
 RUN go mod download
 
-# Copiar código fuente
+# Copiar el resto del código
 COPY . .
 
-# Compilar la aplicación
-RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o api ./
+# Compilar binario
+RUN go build -o server .
 
-# Final stage - Imagen mínima
-FROM scratch
+# Etapa 2: imagen final
+FROM alpine:latest
 
-# Copiar el binario compilado
-COPY --from=builder /build/api /api
+# Crear directorio de trabajo
+WORKDIR /app
 
-# Exponer puerto
+# Copiar binario desde la etapa anterior
+COPY --from=builder /app/server .
+COPY .env .env
+
+# Exponer el puerto 8084
 EXPOSE 8084
 
-# Ejecutar el binario
-ENTRYPOINT ["/api"]
+# Comando para ejecutar
+CMD ["./server"]
