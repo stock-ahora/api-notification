@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -10,67 +11,69 @@ import (
 	"time"
 
 	"github.com/stock-ahora/api-notification/internal/config"
-	"github.com/stock-ahora/api-notification/internal/handlers"
 	"github.com/stock-ahora/api-notification/internal/messaging"
-	"github.com/stock-ahora/api-notification/internal/service"
 )
 
 func main() {
-	// Cargar configuración
+	// 1. Cargar configuración
 	cfg, err := config.Load()
 	if err != nil {
-		log.Fatal("Failed to load config:", err)
+		log.Fatal("Error loading config:", err)
 	}
 
-	// Conectar a RabbitMQ
-	mqConn, mqChannel, err := messaging.Connect(cfg.RabbitMQ)
+	log.Printf("Starting API on port %s", cfg.Port)
+
+	// 2. Crear consumer de RabbitMQ
+	consumer, err := messaging.NewConsumer(cfg.RabbitMQ)
 	if err != nil {
-		log.Fatal("Failed to connect to RabbitMQ:", err)
+		log.Fatal("Error creating consumer:", err)
 	}
-	defer mqConn.Close()
-	defer mqChannel.Close()
+	defer consumer.Close()
 
-	// Crear publisher
-	publisher := messaging.NewPublisher(mqChannel)
-
-	// Crear servicio
-	notificationService := service.NewNotificationService(publisher)
-
-	// Iniciar consumer
-	consumer := messaging.NewConsumer(mqChannel, notificationService)
-	go consumer.Start()
-
-	// Configurar HTTP
-	httpHandlers := handlers.NewHandlers(notificationService)
-	router := handlers.SetupRouter(httpHandlers)
-
-	// Servidor HTTP
-	srv := &http.Server{
-		Addr:         ":" + cfg.Server.Port,
-		Handler:      router,
-		ReadTimeout:  cfg.Server.ReadTimeout,
-		WriteTimeout: cfg.Server.WriteTimeout,
-	}
-
-	// Graceful shutdown
-	go gracefulShutdown(srv, consumer)
-
-	log.Printf("🚀 Server starting on port %s", cfg.Server.Port)
-	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		log.Fatal("Failed to start server:", err)
-	}
-}
-
-func gracefulShutdown(srv *http.Server, consumer *messaging.Consumer) {
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
-	<-sigChan
-
-	log.Println("🛑 Shutting down...")
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	// 3. Iniciar consumer en goroutine
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	consumer.Stop()
-	srv.Shutdown(ctx)
+	go func() {
+		if err := consumer.Start(ctx); err != nil {
+			log.Printf("Consumer error: %v", err)
+		}
+	}()
+
+	// 4. Servidor HTTP básico
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintf(w, `{"status":"ok"}`)
+	})
+
+	server := &http.Server{
+		Addr:    ":" + cfg.Port,
+		Handler: mux,
+	}
+
+	// 5. Iniciar servidor
+	go func() {
+		log.Printf("Server listening on :%s", cfg.Port)
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatal("Server error:", err)
+		}
+	}()
+
+	// 6. Graceful shutdown
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	<-quit
+
+	log.Println("Shutting down...")
+
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer shutdownCancel()
+
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		log.Printf("Server shutdown error: %v", err)
+	}
+
+	log.Println("Server stopped")
 }

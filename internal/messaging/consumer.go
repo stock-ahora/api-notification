@@ -1,136 +1,104 @@
-package messaging
+package consumer
 
 import (
-	"encoding/json"
+	"context"
+	"fmt"
 	"log"
 
-	"github.com/stock-ahora/api-notification/internal/domain"
-	"github.com/stock-ahora/api-notification/internal/service"
-
-	"github.com/streadway/amqp"
+	amqp "github.com/rabbitmq/amqp091-go"
+	"github.com/stock-ahora/api-notification/internal/config"
 )
 
 type Consumer struct {
+	conn    *amqp.Connection
 	channel *amqp.Channel
-	service *service.NotificationService
-	done    chan bool
+	queue   string
 }
 
-func NewConsumer(channel *amqp.Channel, service *service.NotificationService) *Consumer {
+func NewConsumer(cfg config.RabbitMQConfig) (*Consumer, error) {
+	conn, err := amqp.Dial(cfg.URL)
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect to RabbitMQ: %w", err)
+	}
+
+	channel, err := conn.Channel()
+	if err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("failed to open channel: %w", err)
+	}
+
+	// Declarar la cola (si no existe)
+	_, err = channel.QueueDeclare(
+		cfg.QueueName, // name
+		true,          // durable
+		false,         // delete when unused
+		false,         // exclusive
+		false,         // no-wait
+		nil,           // arguments
+	)
+	if err != nil {
+		channel.Close()
+		conn.Close()
+		return nil, fmt.Errorf("failed to declare queue: %w", err)
+	}
+
+	log.Printf("Connected to RabbitMQ, queue: %s", cfg.QueueName)
+
 	return &Consumer{
+		conn:    conn,
 		channel: channel,
-		service: service,
-		done:    make(chan bool),
-	}
+		queue:   cfg.QueueName,
+	}, nil
 }
 
-func (c *Consumer) Start() error {
-	if err := c.setupQueues(); err != nil {
-		return err
-	}
-
+func (c *Consumer) Start(ctx context.Context) error {
 	msgs, err := c.channel.Consume(
-		"notifications.movements",
-		"",
-		false,
-		false,
-		false,
-		false,
-		nil,
+		c.queue, // queue
+		"",      // consumer
+		false,   // auto-ack
+		false,   // exclusive
+		false,   // no-local
+		false,   // no-wait
+		nil,     // args
 	)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to register consumer: %w", err)
 	}
 
-	go c.processMessages(msgs)
+	log.Println("Consumer started, waiting for messages...")
 
-	log.Println("🎧 Consumer started. Waiting for messages...")
-	<-c.done
-
-	return nil
-}
-
-func (c *Consumer) setupQueues() error {
-	// Declarar exchange
-	err := c.channel.ExchangeDeclare(
-		"movements",
-		"topic",
-		true,
-		false,
-		false,
-		false,
-		nil,
-	)
-	if err != nil {
-		return err
-	}
-
-	// Declarar cola
-	q, err := c.channel.QueueDeclare(
-		"notifications.movements",
-		true,
-		false,
-		false,
-		false,
-		nil,
-	)
-	if err != nil {
-		return err
-	}
-
-	// Bindings
-	bindings := []string{"movement.created", "movement.updated"}
-	for _, key := range bindings {
-		err = c.channel.QueueBind(
-			q.Name,
-			key,
-			"movements",
-			false,
-			nil,
-		)
-		if err != nil {
-			return err
+	for {
+		select {
+		case <-ctx.Done():
+			log.Println("Consumer stopped")
+			return nil
+		case msg, ok := <-msgs:
+			if !ok {
+				return fmt.Errorf("channel closed")
+			}
+			c.handleMessage(msg)
 		}
-	}
-
-	return nil
-}
-
-func (c *Consumer) processMessages(msgs <-chan amqp.Delivery) {
-	for msg := range msgs {
-		go c.handleMessage(msg)
 	}
 }
 
 func (c *Consumer) handleMessage(msg amqp.Delivery) {
-	log.Printf("📥 Message received: %s", msg.RoutingKey)
+	log.Printf("Received message: %s", string(msg.Body))
 
-	var event domain.MovementEvent
-	if err := json.Unmarshal(msg.Body, &event); err != nil {
-		log.Printf("❌ Error deserializing: %v", err)
-		msg.Nack(false, false)
-		return
+	// AQUÍ PROCESAS EL MENSAJE
+	// Por ahora solo lo imprimimos
+
+	// Acknowledge el mensaje
+	if err := msg.Ack(false); err != nil {
+		log.Printf("Error acknowledging message: %v", err)
 	}
-
-	var err error
-	switch msg.RoutingKey {
-	case "movement.created":
-		err = c.service.ProcessMovementCreated(event)
-	case "movement.updated":
-		err = c.service.ProcessMovementUpdated(event)
-	default:
-		log.Printf("⚠️ Unhandled routing key: %s", msg.RoutingKey)
-	}
-
-	if err != nil {
-		log.Printf("❌ Error processing: %v", err)
-		msg.Nack(false, true)
-		return
-	}
-
-	msg.Ack(false)
 }
 
-func (c *Consumer) Stop() {
-	close(c.done)
+func (c *Consumer) Close() error {
+	if c.channel != nil {
+		c.channel.Close()
+	}
+	if c.conn != nil {
+		c.conn.Close()
+	}
+	return nil
 }
