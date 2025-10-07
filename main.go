@@ -24,7 +24,7 @@ func main() {
 	log.Printf("Starting API on port %s", cfg.Port)
 
 	// 2. Crear consumer de RabbitMQ
-	consumer, err := messaging.NewConsumer(cfg.RabbitMQ)
+	consumer, err := consumer.NewConsumer(cfg.RabbitMQ)
 	if err != nil {
 		log.Fatal("Error creating consumer:", err)
 	}

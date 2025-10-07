@@ -1,13 +1,9 @@
 package config
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/session"
-	"github.com/aws/aws-sdk-go/service/secretsmanager"
 	"github.com/joho/godotenv"
 )
 
@@ -21,28 +17,33 @@ type RabbitMQConfig struct {
 	QueueName string
 }
 
-type RabbitMQSecret struct {
-	Host     string `json:"host"`
-	Port     string `json:"port"`
-	Username string `json:"username"`
-	Password string `json:"password"`
-	Vhost    string `json:"vhost"`
-}
-
 func Load() (*Config, error) {
 	// Cargar .env si existe (local)
 	godotenv.Load()
 
+	// Variables de entorno
 	port := getEnv("PORT", "8084")
 	queueName := getEnv("RABBITMQ_QUEUE", "notifications")
-	awsRegion := getEnv("AWS_REGION", "us-east-1")
-	secretName := getEnv("AWS_SECRET_NAME", "prod/rabbitmq/credentials")
 
-	// Obtener credenciales de AWS Secret Manager
-	rabbitMQURL, err := getRabbitMQCredentials(awsRegion, secretName)
-	if err != nil {
-		return nil, fmt.Errorf("error getting RabbitMQ credentials: %w", err)
+	// RabbitMQ desde variables de entorno
+	mqHost := getEnv("MQ_HOST", "")
+	mqPort := getEnv("MQ_PORT", "5672")
+	mqUser := getEnv("MQ_USER", "")
+	mqPassword := getEnv("MQ_PASSWORD", "")
+	mqVhost := getEnv("RMQ_VHOST", "/")
+
+	if mqHost == "" || mqUser == "" || mqPassword == "" {
+		return nil, fmt.Errorf("missing RabbitMQ credentials: MQ_HOST, MQ_USER, or MQ_PASSWORD")
 	}
+
+	// Construir URL de RabbitMQ
+	rabbitMQURL := fmt.Sprintf("amqp://%s:%s@%s:%s%s",
+		mqUser,
+		mqPassword,
+		mqHost,
+		mqPort,
+		mqVhost,
+	)
 
 	return &Config{
 		Port: port,
@@ -51,46 +52,6 @@ func Load() (*Config, error) {
 			QueueName: queueName,
 		},
 	}, nil
-}
-
-func getRabbitMQCredentials(region, secretName string) (string, error) {
-	sess, err := session.NewSession(&aws.Config{
-		Region: aws.String(region),
-	})
-	if err != nil {
-		return "", err
-	}
-
-	svc := secretsmanager.New(sess)
-	input := &secretsmanager.GetSecretValueInput{
-		SecretId: aws.String(secretName),
-	}
-
-	result, err := svc.GetSecretValue(input)
-	if err != nil {
-		return "", err
-	}
-
-	var secret RabbitMQSecret
-	if err := json.Unmarshal([]byte(*result.SecretString), &secret); err != nil {
-		return "", err
-	}
-
-	// Construir URL de RabbitMQ
-	vhost := secret.Vhost
-	if vhost == "" {
-		vhost = "/"
-	}
-
-	url := fmt.Sprintf("amqp://%s:%s@%s:%s%s",
-		secret.Username,
-		secret.Password,
-		secret.Host,
-		secret.Port,
-		vhost,
-	)
-
-	return url, nil
 }
 
 func getEnv(key, defaultValue string) string {
