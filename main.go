@@ -10,58 +10,56 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/gorilla/mux"
+	"github.com/joho/godotenv"
 	"github.com/stock-ahora/api-notification/internal/config"
 	"github.com/stock-ahora/api-notification/internal/messaging"
 )
 
 func main() {
+	// Cargar variables de entorno desde el archivo .env
+	if err := godotenv.Load(); err != nil {
+		log.Fatal("Error loading .env file:", err)
+	}
 	// 1. Cargar configuración
-	cfg, err := config.Load()
+	cfg, err := config.LoadSecrets()
 	if err != nil {
 		log.Fatal("Error loading config:", err)
 	}
 
-	log.Printf("Starting API on port %s", cfg.Port)
+	log.Printf("Starting API on port %d", cfg.ServerPort)
 
 	// 2. Crear consumer de RabbitMQ
-	consumer, err := consumer.NewConsumer(cfg.RabbitMQ)
+	consumer, err := messaging.NewConsumer(*cfg.GetRabbitMQConfig())
 	if err != nil {
 		log.Fatal("Error creating consumer:", err)
 	}
 	defer consumer.Close()
 
-	// 3. Iniciar consumer en goroutine
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	// 3. Crear router
+	router := mux.NewRouter()
 
-	go func() {
-		if err := consumer.Start(ctx); err != nil {
-			log.Printf("Consumer error: %v", err)
-		}
-	}()
-
-	// 4. Servidor HTTP básico
-	mux := http.NewServeMux()
-
-	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+	// 4. Configurar rutas
+	router.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		fmt.Fprintf(w, `{"status":"ok"}`)
-	})
+		w.Write([]byte("OK"))
+	}).Methods("GET")
 
+	// 5. Configurar servidor HTTP
 	server := &http.Server{
-		Addr:    ":" + cfg.Port,
-		Handler: mux,
+		Addr:    fmt.Sprintf(":%d", cfg.ServerPort),
+		Handler: router,
 	}
 
-	// 5. Iniciar servidor
+	// 6. Iniciar servidor
 	go func() {
-		log.Printf("Server listening on :%s", cfg.Port)
+		log.Printf("Server listening on :%d", cfg.ServerPort)
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatal("Server error:", err)
 		}
 	}()
 
-	// 6. Graceful shutdown
+	// 7. Graceful shutdown
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
